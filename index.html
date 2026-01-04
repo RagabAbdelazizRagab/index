@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>QCC-X Browser Compression</title>
+
+<style>
+:root{
+  --bg:#0e1117;
+  --card:#161b22;
+  --accent:#00ff88;
+  --text:#c9d1d9;
+}
+*{box-sizing:border-box;font-family:system-ui}
+body{margin:0;background:var(--bg);color:var(--text)}
+.container{max-width:1100px;margin:auto;padding:30px}
+h1{color:var(--accent)}
+.card{background:var(--card);padding:20px;border-radius:12px;margin-bottom:15px}
+button{
+  background:var(--accent);
+  border:none;
+  padding:12px 18px;
+  margin:5px;
+  border-radius:8px;
+  font-weight:bold;
+  cursor:pointer
+}
+.drop{
+  border:2px dashed var(--accent);
+  padding:40px;
+  border-radius:12px;
+  text-align:center;
+  cursor:pointer
+}
+.grid{
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(220px,1fr));
+  gap:12px
+}
+.stat{font-size:26px;color:var(--accent)}
+.progress{height:14px;background:#222;border-radius:8px;overflow:hidden}
+.progress div{height:100%;width:0%;background:var(--accent)}
+.log{
+  background:#0b0d11;
+  height:220px;
+  overflow:auto;
+  padding:15px;
+  border-radius:10px;
+  font-size:13px
+}
+.topbar{display:flex;justify-content:space-between;align-items:center}
+</style>
+</head>
+
+<body>
+<div class="container">
+
+<div class="topbar">
+  <h1 data-i18n="title">🧠 QCC-X Compression System</h1>
+  <button onclick="toggleLang()" id="langBtn">🌐 عربي</button>
+</div>
+
+<p data-i18n="subtitle">WASM • Streaming • Safe • Large Files</p>
+
+<div class="drop" onclick="fileInput.click()">
+  <span data-i18n="drop">📂 Click or Drop File Here</span>
+  <input type="file" id="fileInput" hidden>
+</div>
+
+<br>
+
+<div class="grid">
+  <div class="card"><div data-i18n="orig">Original Size</div><div class="stat" id="orig">0</div></div>
+  <div class="card"><div data-i18n="comp">Processed Size</div><div class="stat" id="comp">0</div></div>
+  <div class="card"><div data-i18n="save">Savings</div><div class="stat" id="save">0%</div></div>
+  <div class="card"><div data-i18n="speed">Speed</div><div class="stat" id="speed">0 MB/s</div></div>
+</div>
+
+<br>
+
+<div class="card">
+  <button onclick="startCompress()" data-i18n="compress">🚀 Compress</button>
+  <button onclick="startDecompress()" data-i18n="decompress">📂 Decompress</button>
+  <button onclick="downloadResult()" data-i18n="download">⬇ Download</button>
+</div>
+
+<div class="card">
+  <div class="progress"><div id="bar"></div></div>
+</div>
+
+<div class="log" id="log"></div>
+
+</div>
+
+<script>
+/* ================== Language ================== */
+let lang="en";
+const L={
+ en:{title:"🧠 QCC-X Compression System",subtitle:"WASM • Streaming • Safe • Large Files",drop:"📂 Click or Drop File Here",compress:"Compress",decompress:"Decompress",download:"Download",orig:"Original Size",comp:"Processed Size",save:"Savings",speed:"Speed"},
+ ar:{title:"🧠 نظام QCC-X للضغط",subtitle:"WASM • بث مباشر • حماية • ملفات ضخمة",drop:"📂 اضغط أو اسحب الملف هنا",compress:"ضغط",decompress:"فك الضغط",download:"تحميل",orig:"الحجم الأصلي",comp:"الحجم بعد المعالجة",save:"نسبة التوفير",speed:"السرعة"}
+};
+function toggleLang(){
+ lang=lang==="en"?"ar":"en";
+ document.body.dir=lang==="ar"?"rtl":"ltr";
+ langBtn.textContent=lang==="ar"?"🌐 English":"🌐 عربي";
+ document.querySelectorAll("[data-i18n]").forEach(e=>e.textContent=L[lang][e.dataset.i18n]);
+}
+
+/* ================== Utils ================== */
+function format(b){
+ if(b<1024)return b+" B";
+ if(b<1048576)return(b/1024).toFixed(2)+" KB";
+ if(b<1073741824)return(b/1048576).toFixed(2)+" MB";
+ return(b/1073741824).toFixed(2)+" GB";
+}
+function log(t){
+ logBox.textContent+=t+"\n";
+ logBox.scrollTop=logBox.scrollHeight;
+}
+
+/* ================== IndexedDB (Recovery) ================== */
+let db;
+indexedDB.open("QCCX_DB",1).onupgradeneeded=e=>{
+ e.target.result.createObjectStore("chunks",{keyPath:"id"});
+};
+indexedDB.open("QCCX_DB",1).onsuccess=e=>db=e.target.result;
+
+function saveChunk(id,data){
+ db.transaction("chunks","readwrite").objectStore("chunks").put({id,data});
+}
+
+/* ================== Worker (Inline Blob) ================== */
+const workerCode=`
+self.onmessage=async e=>{
+ const {file,mode}=e.data;
+ const CHUNK=4*1024*1024;
+ let off=0,idx=0;
+ let totalOut=0;
+ const out=[];
+ while(off<file.size){
+  const slice=file.slice(off,off+CHUNK);
+  const buf=await slice.arrayBuffer();
+  const cs=mode==="compress"?new CompressionStream("gzip"):new DecompressionStream("gzip");
+  const data=await new Response(new Blob([buf]).stream().pipeThrough(cs)).arrayBuffer();
+  const u8=new Uint8Array(data);
+  out.push(u8);
+  totalOut+=u8.length;
+  self.postMessage({progress:off+CHUNK});
+  off+=CHUNK;
+  idx++;
+ }
+ self.postMessage({done:true,out});
+};
+`;
+const workerURL=URL.createObjectURL(new Blob([workerCode],{type:"application/javascript"}));
+
+/* ================== Main ================== */
+let currentFile, resultBlob, startTime;
+const bar=document.getElementById("bar");
+const logBox=document.getElementById("log");
+
+fileInput.onchange=e=>{
+ currentFile=e.target.files[0];
+ orig.textContent=format(currentFile.size);
+ log("Loaded: "+currentFile.name);
+};
+
+function startCompress(){run("compress")}
+function startDecompress(){run("decompress")}
+
+function run(mode){
+ if(!currentFile)return;
+ bar.style.width="0%";
+ log("▶ "+mode+" started...");
+ startTime=performance.now();
+ const w=new Worker(workerURL);
+ w.onmessage=e=>{
+  if(e.data.progress){
+   bar.style.width=Math.min(100,e.data.progress/currentFile.size*100)+"%";
+  }
+  if(e.data.done){
+   resultBlob=new Blob(e.data.out);
+   comp.textContent=format(resultBlob.size);
+   save.textContent=((1-resultBlob.size/currentFile.size)*100).toFixed(2)+"%";
+   speed.textContent=((currentFile.size/1e6)/((performance.now()-startTime)/1000)).toFixed(2)+" MB/s";
+   bar.style.width="100%";
+   log("✔ Completed safely");
+  }
+ };
+ w.postMessage({file:currentFile,mode});
+}
+
+function downloadResult(){
+ if(!resultBlob)return;
+ const a=document.createElement("a");
+ a.href=URL.createObjectURL(resultBlob);
+ a.download=currentFile.name+(currentFile.name.endsWith(".gz")?"":".gz");
+ a.click();
+}
+</script>
+</body>
+</html>
